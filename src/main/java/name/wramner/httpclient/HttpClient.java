@@ -13,11 +13,23 @@
  */
 package name.wramner.httpclient;
 
-import java.io.*;
-import java.net.*;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.charset.Charset;
 import java.nio.charset.UnsupportedCharsetException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -49,8 +61,8 @@ public class HttpClient {
      * Request headers that the client wants to control. These will be ignored if specified by the caller.
      */
     private static final Set<HttpHeader> RESERVED_HEADERS = new HashSet<HttpHeader>(
-            Arrays.asList(new HttpHeader[] { HttpHeaders.CONTENT_LENGTH, HttpHeaders.ACCEPT_ENCODING,
-                    HttpHeaders.CONNECTION, HttpHeaders.EXPECT, HttpHeaders.HOST }));
+        Arrays.asList(new HttpHeader[] { HttpHeaders.CONTENT_LENGTH, HttpHeaders.ACCEPT_ENCODING,
+                HttpHeaders.CONNECTION, HttpHeaders.EXPECT, HttpHeaders.HOST }));
 
     private final String _host;
     private final int _port;
@@ -58,6 +70,8 @@ public class HttpClient {
     private final int _connectTimeoutMillis;
     private final int _requestTimeoutMillis;
     private final boolean _use100Continue;
+    private final String _proxyHost;
+    private final int _proxyPort;
 
     /**
      * Constructor.
@@ -68,15 +82,19 @@ public class HttpClient {
      * @param connectTimeoutMillis The connection timeout.
      * @param requestTimeoutMillis The read (or request) timeout.
      * @param use100Continue The flag to expect 100-continue before sending request body or not.
+     * @param proxyHost The proxy host or null for no proxy.
+     * @param proxyPort The proxy port.
      */
     HttpClient(String host, int port, SSLSocketFactory sslSocketFactory, int connectTimeoutMillis,
-            int requestTimeoutMillis, boolean use100Continue) {
+            int requestTimeoutMillis, boolean use100Continue, String proxyHost, int proxyPort) {
         _host = host;
         _port = port;
         _sslSocketFactory = sslSocketFactory;
         _connectTimeoutMillis = connectTimeoutMillis;
         _requestTimeoutMillis = requestTimeoutMillis;
         _use100Continue = use100Continue;
+        _proxyHost = proxyHost;
+        _proxyPort = proxyPort;
     }
 
     /**
@@ -113,6 +131,7 @@ public class HttpClient {
             long deadlineMillis = System.currentTimeMillis() + _requestTimeoutMillis;
             socket = createSocket(eventRecorder);
             configureSocket(socket);
+
             StringBuilder sb = new StringBuilder();
             sb.append(method.name()).append(' ').append(url).append(" HTTP/1.1");
             sb.append(CRLF);
@@ -120,11 +139,13 @@ public class HttpClient {
             appendRequestHeaders(sb, requestBodyBytes.length, requestHeaders);
             sendRequest(eventRecorder, socket, sb.toString().getBytes(HTTP_HEADER_CHARSET), requestBodyBytes);
             return readResponse(eventRecorder, socket, deadlineMillis);
-        } finally {
+        }
+        finally {
             if (socket != null) {
                 try {
                     socket.close();
-                } catch (Exception e) {
+                }
+                catch (Exception e) {
                     // Ignore
                 }
             }
@@ -144,7 +165,8 @@ public class HttpClient {
             int read = in.read(buffer, totalRead, buffer.length - totalRead);
             if (read == -1) {
                 throw new EOFException("Unexpected end of response after " + totalRead + " bytes");
-            } else if (read > 0) {
+            }
+            else if (read > 0) {
                 totalRead += read;
                 bodyPosition = findBodyPosition(buffer, totalRead);
             }
@@ -175,13 +197,15 @@ public class HttpClient {
                 int read = in.read(buffer, 0, Math.min(buffer.length, remainingContentLength));
                 if (read == -1) {
                     throw new EOFException("Partial response, " + remainingContentLength + " bytes missing");
-                } else if (read == 0) {
+                }
+                else if (read == 0) {
                     throw new SocketTimeoutException("Timeout reading response body");
                 }
                 bodyOutputStream.write(buffer, 0, read);
                 remainingContentLength -= read;
             }
-        } else {
+        }
+        else {
             // Read until end of file
             for (;;) {
                 updateSocketTimeout(socket, deadlineMillis);
@@ -189,7 +213,8 @@ public class HttpClient {
                 if (read == -1) {
                     // Done!
                     break;
-                } else if (read == 0) {
+                }
+                else if (read == 0) {
                     throw new SocketTimeoutException("Timeout reading response body");
                 }
                 bodyOutputStream.write(buffer, 0, read);
@@ -237,7 +262,8 @@ public class HttpClient {
         String[] statusFields = statusLine.split(" ");
         if (statusFields.length >= 3 && statusFields[0].startsWith("HTTP/")) {
             return Integer.parseInt(statusFields[1]);
-        } else {
+        }
+        else {
             throw new IOException("Invalid HTTP response status line: " + statusLine);
         }
     }
@@ -284,29 +310,35 @@ public class HttpClient {
         for (int c = in.read();; c = in.read()) {
             if (c == -1) {
                 throw new EOFException("End of file waiting for 100-continue!");
-            } else if (c == '\r') {
+            }
+            else if (c == '\r') {
                 foundCr = true;
-            } else if (c == '\n') {
+            }
+            else if (c == '\n') {
                 if (foundCr) {
                     foundCr = false;
                     byte[] lineAsBytes = byteStream.toByteArray();
                     if (lineAsBytes.length == 0) {
                         if (found100Continue) {
                             break;
-                        } else {
+                        }
+                        else {
                             throw new IOException("Unexpected blank line before 100 continue!");
                         }
-                    } else {
+                    }
+                    else {
                         String line = new String(lineAsBytes, HTTP_HEADER_CHARSET);
                         if (line.startsWith("HTTP/1.1 100")) {
                             byteStream = new ByteArrayOutputStream();
                             found100Continue = true;
-                        } else {
+                        }
+                        else {
                             throw new IOException("Unexpected response waiting for 100 continue: " + line);
                         }
                     }
                 }
-            } else {
+            }
+            else {
                 foundCr = false;
                 byteStream.write(c);
             }
@@ -338,7 +370,8 @@ public class HttpClient {
         long remainingTimeMillis = deadlineMillis - System.currentTimeMillis();
         if (remainingTimeMillis <= 0) {
             throw new SocketTimeoutException("Request timed out");
-        } else {
+        }
+        else {
             socket.setSoTimeout((int) remainingTimeMillis);
         }
     }
@@ -350,11 +383,12 @@ public class HttpClient {
             if (buffer[lineEndPos] == '\n' && buffer[lineEndPos - 1] == '\r') {
                 if (lineEndPos > lineStartPos + 1) {
                     String headerLine = new String(buffer, lineStartPos, lineEndPos - 1 - lineStartPos,
-                            HTTP_HEADER_CHARSET);
+                        HTTP_HEADER_CHARSET);
                     int separatorPos = headerLine.indexOf(":");
                     if (separatorPos == -1) {
                         responseHeaders.add(new HttpHeader(headerLine).withValue(""));
-                    } else if (separatorPos > 0) {
+                    }
+                    else if (separatorPos > 0) {
                         String headerKey = headerLine.substring(0, separatorPos).toLowerCase();
                         String headerValue = (separatorPos < headerLine.length()
                                 ? headerLine.substring(separatorPos + 1) : "").trim();
@@ -401,7 +435,8 @@ public class HttpClient {
                 String charsetName = contentType.substring(startIndex, endIndex);
                 try {
                     return Charset.forName(charsetName);
-                } catch (UnsupportedCharsetException e) {
+                }
+                catch (UnsupportedCharsetException e) {
                     return HTTP_DEFAULT_CHARSET;
                 }
             }
@@ -410,9 +445,16 @@ public class HttpClient {
     }
 
     private Socket createSocket(EventRecorder recorder) throws UnknownHostException, IOException {
-        Socket nonSslSocket = new Socket();
         recorder.recordEvent(Event.CONNECTING);
-        nonSslSocket.connect(new InetSocketAddress(_host, _port), _connectTimeoutMillis);
+
+        Socket nonSslSocket;
+        if (_proxyHost == null) {
+            nonSslSocket = new Socket();
+            nonSslSocket.connect(new InetSocketAddress(_host, _port), _connectTimeoutMillis);
+        }
+        else {
+            nonSslSocket = connectThroughProxy(recorder);
+        }
         recorder.recordEvent(Event.CONNECTED);
         if (_sslSocketFactory != null) {
             SSLSocket socket = (SSLSocket) _sslSocketFactory.createSocket(nonSslSocket, _host, _port, true);
@@ -420,9 +462,73 @@ public class HttpClient {
             socket.startHandshake();
             recorder.recordEvent(Event.SSL_HANDSHAKE_COMPLETE);
             return socket;
-        } else {
+        }
+        else {
             return nonSslSocket;
         }
+    }
+
+    public Socket connectThroughProxy(EventRecorder recorder) throws IOException {
+        Socket nonSslSocket = new Socket();
+        Socket socketToClose = nonSslSocket;
+        try {
+            nonSslSocket.connect(new InetSocketAddress(_proxyHost, _proxyPort), _connectTimeoutMillis);
+            recorder.recordEvent(Event.CONNECTED_PROXY);
+            StringBuilder sb = new StringBuilder();
+            sb.append("CONNECT ").append(_host).append(':').append(_port).append(" HTTP/1.1").append(CRLF);
+            sb.append("Host: ").append(_host).append(':').append(_port).append(CRLF);
+            sb.append("Proxy-Connection: keep-alive").append(CRLF);
+            sb.append("User-Agent: HttpClient").append(CRLF);
+            sb.append(CRLF);
+            nonSslSocket.getOutputStream().write(sb.toString().getBytes(HTTP_HEADER_CHARSET));
+            HttpResponse resp = readProxyConnectResponse(nonSslSocket, _requestTimeoutMillis + System.currentTimeMillis());
+            if (resp.getHttpResponseCode() == 407) {
+                throw new ProxyAuthenticationRequiredException(
+                    "Failed to connect through " + _proxyHost + ":" + _proxyPort + ", proxy requires authentication");
+            }
+            else if (!resp.isSuccess()) {
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                        + ", error " + resp.getHttpResponseCode());
+            }
+            socketToClose = null;
+            return nonSslSocket;
+        }
+        finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    private HttpResponse readProxyConnectResponse(Socket socket, long deadlineMillis)
+            throws IOException {
+        byte[] buffer = new byte[RECEIVE_BUFFER_SIZE];
+        InputStream in = socket.getInputStream();
+        int totalRead = 0;
+        int bodyPosition = 0;
+        while (totalRead < buffer.length && bodyPosition == 0) {
+            updateSocketTimeout(socket, deadlineMillis);
+            int read = in.read(buffer, totalRead, buffer.length - totalRead);
+            if (read == -1) {
+                throw new EOFException("Unexpected end of response after " + totalRead + " bytes");
+            }
+            else if (read > 0) {
+                totalRead += read;
+                bodyPosition = findBodyPosition(buffer, totalRead);
+            }
+        }
+
+        if (bodyPosition == 0) {
+            throw new IOException("More than " + buffer.length + " bytes read before body!");
+        }
+
+        int endOfStatusLine = findEndOfLine(buffer, 0, bodyPosition);
+        if (endOfStatusLine == 0) {
+            throw new IllegalStateException("Found CRLFCRLF but not CRLF!?!");
+        }
+        int httpResponseCode = parseHttpStatusCode(buffer, endOfStatusLine);
+        List<HttpHeaderWithValue> responseHeaders = parseHeaders(buffer, endOfStatusLine + 2, bodyPosition);
+        return new HttpResponse(httpResponseCode, responseHeaders, new byte[0]);
     }
 
     /**
@@ -431,6 +537,7 @@ public class HttpClient {
     public enum Event {
         ENTER_SEND_REQUEST,
         CONNECTING,
+        CONNECTED_PROXY,
         CONNECTED,
         SSL_HANDSHAKE_COMPLETE,
         SENDING_REQUEST,

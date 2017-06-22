@@ -30,6 +30,8 @@ public class HttpClientBuilder {
     private int _requestTimeoutMillis;
     private boolean _use100Continue;
     private boolean _useSsl;
+    private String _proxyHost;
+    private int _proxyPort;
 
     /**
      * Constructor.
@@ -111,13 +113,26 @@ public class HttpClientBuilder {
     }
 
     /**
+     * Add a proxy.
+     *
+     * @param host The proxy host.
+     * @param port The proxy port.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxy(String host, int port) {
+        _proxyHost = host;
+        _proxyPort = port;
+        return this;
+    }
+
+    /**
      * Get {@link HttpClient}.
      *
      * @return client.
      */
     public HttpClient build() {
         return new HttpClient(_host, getPort(), getSSLSocketFactory(), _connectTimeoutMillis, _requestTimeoutMillis,
-                _use100Continue);
+                _use100Continue, _proxyHost, _proxyPort);
     }
 
     /**

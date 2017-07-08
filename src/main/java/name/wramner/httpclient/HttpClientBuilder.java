@@ -13,6 +13,8 @@
  */
 package name.wramner.httpclient;
 
+import java.net.PasswordAuthentication;
+
 import javax.net.ssl.SSLSocketFactory;
 
 /**
@@ -32,6 +34,7 @@ public class HttpClientBuilder {
     private boolean _useSsl;
     private String _proxyHost;
     private int _proxyPort;
+    private PasswordAuthentication _proxyAuthentication;
 
     /**
      * Constructor.
@@ -126,13 +129,24 @@ public class HttpClientBuilder {
     }
 
     /**
+     * Set user and password for proxy.
+     * 
+     * @param auth The user and password.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxyAuthentication(PasswordAuthentication auth) {
+        _proxyAuthentication = auth;
+        return this;
+    }
+
+    /**
      * Get {@link HttpClient}.
      *
      * @return client.
      */
     public HttpClient build() {
         return new HttpClient(_host, getPort(), getSSLSocketFactory(), _connectTimeoutMillis, _requestTimeoutMillis,
-                _use100Continue, _proxyHost, _proxyPort);
+                        _use100Continue, _proxyHost, _proxyPort, _proxyAuthentication);
     }
 
     /**
@@ -142,7 +156,7 @@ public class HttpClientBuilder {
      */
     private SSLSocketFactory getSSLSocketFactory() {
         return _sslSocketFactory != null ? _sslSocketFactory
-                : (_useSsl ? (SSLSocketFactory) SSLSocketFactory.getDefault() : null);
+                        : (_useSsl ? (SSLSocketFactory) SSLSocketFactory.getDefault() : null);
     }
 
     /**

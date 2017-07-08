@@ -27,4 +27,5 @@ public interface HttpHeaders {
     public static final HttpHeader COOKIE = new HttpHeader("Cookie");
     public static final HttpHeader EXPECT = new HttpHeader("Expect");
     public static final HttpHeader HOST = new HttpHeader("Host");
+    public static final HttpHeader PROXY_AUTHENTICATE = new HttpHeader("Proxy-Authenticate");
 }

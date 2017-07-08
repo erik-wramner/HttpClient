@@ -14,14 +14,32 @@
 package name.wramner.httpclient;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Exception thrown when failing to connect through a proxy server as it requires authentication.
  */
 public class ProxyAuthenticationRequiredException extends IOException {
     private static final long serialVersionUID = 1L;
+    private final List<String> _proxyAuthHeaders;
 
-    public ProxyAuthenticationRequiredException(String message) {
+    /**
+     * Constructor.
+     *
+     * @param message The message.
+     * @param proxyAuthHeaders The proxy authentication header values with supported methods.
+     */
+    public ProxyAuthenticationRequiredException(String message, List<String> proxyAuthHeaders) {
         super(message);
+        _proxyAuthHeaders = proxyAuthHeaders;
+    }
+
+    /**
+     * Get the Proxy-Authenticate headers returned by the proxy server with supported methods.
+     *
+     * @return list with header values.
+     */
+    public List<String> getProxyAuthenticationHeaders() {
+        return _proxyAuthHeaders;
     }
 }

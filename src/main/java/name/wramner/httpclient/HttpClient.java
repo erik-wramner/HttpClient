@@ -511,10 +511,10 @@ public class HttpClient {
 
                 List<String> proxyAuthHeaders = resp.getHeaders(HttpHeaders.PROXY_AUTHENTICATE);
                 if (_proxyAuthentication != null) {
-                    if (proxyAuthHeaders.stream().anyMatch(s -> s.startsWith("Basic"))) {
+                    if (proxyAuthHeaders.contains("NTLM")) {
+                        return connectThroughProxyWithNtlmAuthentication(recorder);
+                    } else if (proxyAuthHeaders.stream().anyMatch(s -> s.startsWith("Basic"))) {
                         return connectThroughProxyWithBasicAuthentication(recorder);
-                    } else if (proxyAuthHeaders.contains("NTLM")) {
-                        // TODO: implement NTLM proxy authentication
                     }
                 }
 
@@ -550,6 +550,51 @@ public class HttpClient {
                                                                             .getBytes(HTTP_HEADER_CHARSET))).getBytes(
                                                                                             HTTP_HEADER_CHARSET));
             HttpResponse resp = readProxyConnectResponse(socket, _requestTimeoutMillis + System.currentTimeMillis());
+            if (resp.isSuccess()) {
+                recorder.recordEvent(Event.AUTHENTICATED_PROXY);
+                socketToClose = null;
+                return socket;
+            } else {
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                                + ", error " + resp.getHttpResponseCode());
+            }
+        } finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    /**
+     * Connect to the specified proxy server, authenticate using NTLM and send a CONNECT message.
+     * 
+     * @param recorder The event recorder.
+     * @return connected socket tunneling to the target host.
+     * @throws IOException on errors.
+     */
+    private Socket connectThroughProxyWithNtlmAuthentication(EventRecorder recorder) throws IOException {
+        Socket socketToClose = null;
+        try {
+            NtlmHelper ntlmHelper = new NtlmHelper();
+            Socket socket = connect(_proxyHost, _proxyPort);
+            socketToClose = socket;
+            socket.getOutputStream()
+                            .write(createProxyConnectRequest("Proxy-Authorization: NTLM "
+                                            + ntlmHelper.createNtlmNegotiateMessage(null, null))
+                                                            .getBytes(HTTP_HEADER_CHARSET));
+            HttpResponse resp = readProxyConnectResponse(socket, _requestTimeoutMillis + System.currentTimeMillis());
+
+            if (resp.getHttpResponseCode() == 407) {
+                String encodedChallenge = resp.getHeaders(HttpHeaders.PROXY_AUTHENTICATE).stream()
+                                .filter(h -> h.startsWith("NTLM ")).findFirst().map(h -> h.substring(5).trim())
+                                .orElse("");
+                if (!encodedChallenge.isEmpty()) {
+                    // TODO: test code to parse the response, then we need to send a new message
+                    ntlmHelper.parseNtlmChallengeMessage(encodedChallenge);
+                }
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                                + ", error " + resp.getHttpResponseCode());
+            }
             if (resp.isSuccess()) {
                 recorder.recordEvent(Event.AUTHENTICATED_PROXY);
                 socketToClose = null;

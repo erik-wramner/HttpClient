@@ -35,6 +35,8 @@ public class HttpClientBuilder {
     private String _proxyHost;
     private int _proxyPort;
     private PasswordAuthentication _proxyAuthentication;
+    private NtlmAuthenticationHandler _ntlmAuthenticationHandler;
+    private boolean _preemptiveProxyAuthentication;
 
     /**
      * Constructor.
@@ -135,7 +137,22 @@ public class HttpClientBuilder {
      * @return builder.
      */
     public HttpClientBuilder withProxyAuthentication(PasswordAuthentication auth) {
+        return withProxyAuthentication(auth, false);
+    }
+
+    /**
+     * Set user and password and preemptive status for proxy. When preemptive authentication is enabled the initial
+     * request will include an NTLM negotiation message if an NTLM handler has been configured or a Basic authentication
+     * header otherwise. By default the client will try without authentication; it will then pick the fastest method
+     * advertised by the proxy server.
+     * 
+     * @param auth The user and password.
+     * @param preemptive The preemptive flag.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxyAuthentication(PasswordAuthentication auth, boolean preemptive) {
         _proxyAuthentication = auth;
+        _preemptiveProxyAuthentication = preemptive;
         return this;
     }
 
@@ -146,7 +163,8 @@ public class HttpClientBuilder {
      */
     public HttpClient build() {
         return new HttpClient(_host, getPort(), getSSLSocketFactory(), _connectTimeoutMillis, _requestTimeoutMillis,
-                        _use100Continue, _proxyHost, _proxyPort, _proxyAuthentication);
+                        _use100Continue, _proxyHost, _proxyPort, _proxyAuthentication, _ntlmAuthenticationHandler,
+                        _preemptiveProxyAuthentication);
     }
 
     /**
@@ -166,5 +184,16 @@ public class HttpClientBuilder {
      */
     private int getPort() {
         return _port != 0 ? _port : (_useSsl ? 443 : 80);
+    }
+
+    /**
+     * Set handler/adapter for NTLM authentication.
+     * 
+     * @param ntlmAuthenticationHandler The NTLM authentication handler.
+     * @return builder.
+     */
+    public HttpClientBuilder withNtlmAuthenticationHandler(NtlmAuthenticationHandler ntlmAuthenticationHandler) {
+        _ntlmAuthenticationHandler = ntlmAuthenticationHandler;
+        return this;
     }
 }

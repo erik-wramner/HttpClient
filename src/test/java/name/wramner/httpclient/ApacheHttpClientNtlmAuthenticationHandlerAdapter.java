@@ -1,3 +1,16 @@
+/*
+ * Copyright 2014 Erik Wramner
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License
+ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing permissions and limitations under
+ * the License.
+ */
 package name.wramner.httpclient;
 
 import java.lang.reflect.Constructor;
@@ -7,6 +20,13 @@ import org.apache.http.impl.auth.NTLMEngineException;
 
 import name.wramner.httpclient.exceptions.NtlmAuthenticationException;
 
+/**
+ * Example adapter that illustrates how the NTLM authentication in the Apache HTTP client can be used. The
+ * implementation is quite dirty as it relies on a package-private implementation class and might break with Java 9, but
+ * it illustrates how it can be done.
+ * 
+ * @author Erik Wramner
+ */
 public class ApacheHttpClientNtlmAuthenticationHandlerAdapter implements NtlmAuthenticationHandler {
     private final NTLMEngine _ntlmEngine;
     private String _domain;

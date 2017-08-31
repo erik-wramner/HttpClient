@@ -13,26 +13,25 @@
  */
 package name.wramner.httpclient.exceptions;
 
-import name.wramner.httpclient.NtlmAuthenticationHandler;
+import java.io.IOException;
 
 /**
- * Exception thrown when the {@link NtlmAuthenticationHandler} fails.
+ * Thrown when proxy authentication has failed. Clients should avoid trying again as this may lock out the user.
+ *
+ * @author Erik Wramner
  */
-public class NtlmAuthenticationException extends Exception {
+public class ProxyAuthenticationFailedException extends IOException {
     private static final long serialVersionUID = 1L;
 
-    public NtlmAuthenticationException() {
-    }
-
-    public NtlmAuthenticationException(String message) {
+    public ProxyAuthenticationFailedException(String message) {
         super(message);
     }
 
-    public NtlmAuthenticationException(Throwable cause) {
+    public ProxyAuthenticationFailedException(Throwable cause) {
         super(cause);
     }
 
-    public NtlmAuthenticationException(String message, Throwable cause) {
+    public ProxyAuthenticationFailedException(String message, Throwable cause) {
         super(message, cause);
     }
 }

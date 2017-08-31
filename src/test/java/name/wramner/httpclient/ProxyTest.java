@@ -30,8 +30,8 @@ public class ProxyTest {
         String targetHost = args[4];
 
         HttpClient client = new HttpClientBuilder(targetHost).withProxy(proxyHost, proxyPort).withSsl(true)
-                        .withProxyAuthentication(new PasswordAuthentication(user, password), true)
-                        .withNtlmAuthenticationHandler(new ApacheHttpClientNtlmAuthenticationHandlerAdapter()).build();
+                        .withProxyAuthentication(new PasswordAuthentication(user, password), AuthenticationScheme.NTLM)
+                        .build();
         ElapsedTimeEventRecorder recorder = new ElapsedTimeEventRecorder();
         try {
             HttpResponse resp = client.sendRequest(recorder, HttpRequestMethod.GET, "/", HttpRequestBody.EMPTY);

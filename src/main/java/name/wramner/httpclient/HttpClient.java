@@ -28,7 +28,6 @@ import java.nio.charset.UnsupportedCharsetException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -36,9 +35,11 @@ import java.util.Set;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
-import name.wramner.httpclient.exceptions.NtlmAuthenticationException;
+import name.wramner.httpclient.exceptions.ProxyAuthenticationFailedException;
 import name.wramner.httpclient.exceptions.ProxyAuthenticationRequiredException;
 import name.wramner.httpclient.exceptions.ProxyProtocolException;
+import name.wramner.httpclient.ntlm.NTLMEngine;
+import name.wramner.httpclient.ntlm.NTLMEngineException;
 
 /**
  * This is a light-weight HTTP client without external dependencies and with support for detailed time recording. It is
@@ -79,8 +80,7 @@ public class HttpClient {
     private final String _proxyHost;
     private final int _proxyPort;
     private final PasswordAuthentication _proxyAuthentication;
-    private final NtlmAuthenticationHandler _ntlmAuthenticationHandler;
-    private final boolean _preemptiveProxyAuthentication;
+    private final AuthenticationScheme _preemptiveProxyAuthenticationScheme;
 
     /**
      * Constructor.
@@ -94,13 +94,12 @@ public class HttpClient {
      * @param proxyHost The proxy host or null for no proxy.
      * @param proxyPort The proxy port.
      * @param proxyAuthentication The optional proxy user and password.
-     * @param ntlmAuthenticationHandler The optional NTLM authentication handler or null.
-     * @param preemptiveProxyAuthentication The flag to authenticate preemptively with the proxy.
+     * @param preemptiveProxyAuthenticationScheme The scheme for preemptive proxy authentication.
      */
     HttpClient(String host, int port, SSLSocketFactory sslSocketFactory, int connectTimeoutMillis,
                     int requestTimeoutMillis, boolean use100Continue, String proxyHost, int proxyPort,
-                    PasswordAuthentication proxyAuthentication, NtlmAuthenticationHandler ntlmAuthenticationHandler,
-                    boolean preemptiveProxyAuthentication) {
+                    PasswordAuthentication proxyAuthentication,
+                    AuthenticationScheme preemptiveProxyAuthenticationScheme) {
         _host = host;
         _port = port;
         _sslSocketFactory = sslSocketFactory;
@@ -110,8 +109,7 @@ public class HttpClient {
         _proxyHost = proxyHost;
         _proxyPort = proxyPort;
         _proxyAuthentication = proxyAuthentication;
-        _ntlmAuthenticationHandler = ntlmAuthenticationHandler;
-        _preemptiveProxyAuthentication = preemptiveProxyAuthentication;
+        _preemptiveProxyAuthenticationScheme = preemptiveProxyAuthenticationScheme;
     }
 
     /**
@@ -521,12 +519,10 @@ public class HttpClient {
     private Socket connectThroughProxy(EventRecorder recorder) throws IOException {
         Socket socketToClose = null;
         try {
-            if (_preemptiveProxyAuthentication) {
-                if (_ntlmAuthenticationHandler != null) {
-                    return connectThroughProxyWithNtlmAuthentication(recorder, true);
-                } else {
-                    return connectThroughProxyWithBasicAuthentication(recorder, true);
-                }
+            if (_preemptiveProxyAuthenticationScheme == AuthenticationScheme.BASIC) {
+                return connectThroughProxyWithBasicAuthentication(recorder, true);
+            } else if (_preemptiveProxyAuthenticationScheme == AuthenticationScheme.NTLM) {
+                return connectThroughProxyWithNtlmAuthentication(recorder, true);
             }
 
             Socket socket = connect(_proxyHost, _proxyPort);
@@ -547,7 +543,7 @@ public class HttpClient {
                 if (_proxyAuthentication != null) {
                     if (proxyAuthHeaders.stream().anyMatch(s -> s.startsWith("Basic"))) {
                         return connectThroughProxyWithBasicAuthentication(recorder, false);
-                    } else if (proxyAuthHeaders.contains("NTLM") && _ntlmAuthenticationHandler != null) {
+                    } else if (proxyAuthHeaders.contains("NTLM")) {
                         return connectThroughProxyWithNtlmAuthentication(recorder, false);
                     }
                 }
@@ -622,9 +618,13 @@ public class HttpClient {
             if (recordConnected) {
                 recorder.recordEvent(Event.CONNECTED_PROXY);
             }
+            NTLMEngine ntlmEngine = new NTLMEngine();
+            String domain = null;
+            String workstation = null;
+
             socket.getOutputStream()
                             .write(createProxyConnectRequest("Proxy-Authorization: NTLM "
-                                            + _ntlmAuthenticationHandler.generateNegotiateMessage(null, null))
+                                            + ntlmEngine.generateType1Msg(domain, workstation))
                                                             .getBytes(HTTP_HEADER_CHARSET));
             HttpResponse resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
 
@@ -633,11 +633,12 @@ public class HttpClient {
                                 .filter(h -> h.startsWith("NTLM ")).findFirst().map(h -> h.substring(5).trim())
                                 .orElse("");
                 if (!encodedChallenge.isEmpty()) {
-                    socket.getOutputStream().write(createProxyConnectRequest("Proxy-Authorization: NTLM "
-                                    + _ntlmAuthenticationHandler.generateAuthenticationMessage(
-                                                    _proxyAuthentication.getUserName(),
-                                                    _proxyAuthentication.getPassword(), encodedChallenge))
-                                                                    .getBytes(HTTP_HEADER_CHARSET));
+                    socket.getOutputStream()
+                                    .write(createProxyConnectRequest("Proxy-Authorization: NTLM "
+                                                    + ntlmEngine.generateType3Msg(_proxyAuthentication.getUserName(),
+                                                                    new String(_proxyAuthentication.getPassword()),
+                                                                    domain, workstation, encodedChallenge))
+                                                                                    .getBytes(HTTP_HEADER_CHARSET));
                     resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
                 }
             }
@@ -646,12 +647,14 @@ public class HttpClient {
                 recorder.recordEvent(Event.AUTHENTICATED_PROXY);
                 socketToClose = null;
                 return socket;
+            } else if (resp.getHttpResponseCode() == 407) {
+                throw new ProxyAuthenticationFailedException("NTLM proxy authentication failed");
             } else {
                 throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
                                 + ", error " + resp.getHttpResponseCode());
             }
-        } catch (NtlmAuthenticationException e) {
-            throw new ProxyAuthenticationRequiredException("NTLM authentication failed", Collections.emptyList());
+        } catch (NTLMEngineException e) {
+            throw new ProxyAuthenticationFailedException("NTLM proxy authentication failed", e);
         } finally {
             if (socketToClose != null) {
                 socketToClose.close();

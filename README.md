@@ -17,3 +17,12 @@ devices.
 
 Need a simple HTTP client that can run on limited hardware and that makes it possible
 to measure what takes time? Give it a try. Otherwise look into something more mainstream.
+
+NOTE! Starting with 1.1, the HTTP client has rudimentary proxy support, including
+support for Basic and NTLM proxy authentication. The NTLM authentication code has
+been copied from https://github.com/apache/httpcomponents-client.git, the Apache
+HTTP client version 4.5. The two projects both use the same license, the code is
+open source and I hereby give credit to the original authors, so without being a
+lawyer I assume that I'm doing the right thing. The code is copied rather than
+included as I really only want one class and I want to keep this package lean
+without external dependencies.

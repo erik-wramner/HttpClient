@@ -590,6 +590,8 @@ public class HttpClient {
                 recorder.recordEvent(Event.AUTHENTICATED_PROXY);
                 socketToClose = null;
                 return socket;
+            } else if (resp.getHttpResponseCode() == 407) {
+                throw new ProxyAuthenticationFailedException("Basic proxy authentication failed");
             } else {
                 throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
                                 + ", error " + resp.getHttpResponseCode());

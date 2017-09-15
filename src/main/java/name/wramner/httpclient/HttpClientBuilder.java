@@ -13,6 +13,8 @@
  */
 package name.wramner.httpclient;
 
+import java.net.PasswordAuthentication;
+
 import javax.net.ssl.SSLSocketFactory;
 
 /**
@@ -30,6 +32,10 @@ public class HttpClientBuilder {
     private int _requestTimeoutMillis;
     private boolean _use100Continue;
     private boolean _useSsl;
+    private String _proxyHost;
+    private int _proxyPort;
+    private PasswordAuthentication _proxyAuthentication;
+    private AuthenticationScheme _preemptiveProxyAuthenticationScheme;
 
     /**
      * Constructor.
@@ -111,13 +117,51 @@ public class HttpClientBuilder {
     }
 
     /**
+     * Add a proxy.
+     *
+     * @param host The proxy host.
+     * @param port The proxy port.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxy(String host, int port) {
+        _proxyHost = host;
+        _proxyPort = port;
+        return this;
+    }
+
+    /**
+     * Set user and password for proxy.
+     * 
+     * @param auth The user and password.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxyAuthentication(PasswordAuthentication auth) {
+        return withProxyAuthentication(auth, null);
+    }
+
+    /**
+     * Set user and password and preemptive scheme for proxy.
+     * 
+     * @param auth The user and password.
+     * @param preemptiveScheme The scheme to use for preemptive authentication or null for none.
+     * @return builder.
+     */
+    public HttpClientBuilder withProxyAuthentication(PasswordAuthentication auth,
+                    AuthenticationScheme preemptiveScheme) {
+        _proxyAuthentication = auth;
+        _preemptiveProxyAuthenticationScheme = preemptiveScheme;
+        return this;
+    }
+
+    /**
      * Get {@link HttpClient}.
      *
      * @return client.
      */
     public HttpClient build() {
         return new HttpClient(_host, getPort(), getSSLSocketFactory(), _connectTimeoutMillis, _requestTimeoutMillis,
-                _use100Continue);
+                        _use100Continue, _proxyHost, _proxyPort, _proxyAuthentication,
+                        _preemptiveProxyAuthenticationScheme);
     }
 
     /**
@@ -127,7 +171,7 @@ public class HttpClientBuilder {
      */
     private SSLSocketFactory getSSLSocketFactory() {
         return _sslSocketFactory != null ? _sslSocketFactory
-                : (_useSsl ? (SSLSocketFactory) SSLSocketFactory.getDefault() : null);
+                        : (_useSsl ? (SSLSocketFactory) SSLSocketFactory.getDefault() : null);
     }
 
     /**

@@ -13,14 +13,33 @@
  */
 package name.wramner.httpclient;
 
-import java.io.*;
-import java.net.*;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.PasswordAuthentication;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.Charset;
 import java.nio.charset.UnsupportedCharsetException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
+
+import name.wramner.httpclient.exceptions.ProxyAuthenticationFailedException;
+import name.wramner.httpclient.exceptions.ProxyAuthenticationRequiredException;
+import name.wramner.httpclient.exceptions.ProxyProtocolException;
+import name.wramner.httpclient.ntlm.NTLMEngine;
+import name.wramner.httpclient.ntlm.NTLMEngineException;
 
 /**
  * This is a light-weight HTTP client without external dependencies and with support for detailed time recording. It is
@@ -49,8 +68,8 @@ public class HttpClient {
      * Request headers that the client wants to control. These will be ignored if specified by the caller.
      */
     private static final Set<HttpHeader> RESERVED_HEADERS = new HashSet<HttpHeader>(
-            Arrays.asList(new HttpHeader[] { HttpHeaders.CONTENT_LENGTH, HttpHeaders.ACCEPT_ENCODING,
-                    HttpHeaders.CONNECTION, HttpHeaders.EXPECT, HttpHeaders.HOST }));
+                    Arrays.asList(new HttpHeader[] { HttpHeaders.CONTENT_LENGTH, HttpHeaders.ACCEPT_ENCODING,
+                                    HttpHeaders.CONNECTION, HttpHeaders.EXPECT, HttpHeaders.HOST }));
 
     private final String _host;
     private final int _port;
@@ -58,6 +77,10 @@ public class HttpClient {
     private final int _connectTimeoutMillis;
     private final int _requestTimeoutMillis;
     private final boolean _use100Continue;
+    private final String _proxyHost;
+    private final int _proxyPort;
+    private final PasswordAuthentication _proxyAuthentication;
+    private final AuthenticationScheme _preemptiveProxyAuthenticationScheme;
 
     /**
      * Constructor.
@@ -68,15 +91,25 @@ public class HttpClient {
      * @param connectTimeoutMillis The connection timeout.
      * @param requestTimeoutMillis The read (or request) timeout.
      * @param use100Continue The flag to expect 100-continue before sending request body or not.
+     * @param proxyHost The proxy host or null for no proxy.
+     * @param proxyPort The proxy port.
+     * @param proxyAuthentication The optional proxy user and password.
+     * @param preemptiveProxyAuthenticationScheme The scheme for preemptive proxy authentication.
      */
     HttpClient(String host, int port, SSLSocketFactory sslSocketFactory, int connectTimeoutMillis,
-            int requestTimeoutMillis, boolean use100Continue) {
+                    int requestTimeoutMillis, boolean use100Continue, String proxyHost, int proxyPort,
+                    PasswordAuthentication proxyAuthentication,
+                    AuthenticationScheme preemptiveProxyAuthenticationScheme) {
         _host = host;
         _port = port;
         _sslSocketFactory = sslSocketFactory;
         _connectTimeoutMillis = connectTimeoutMillis;
         _requestTimeoutMillis = requestTimeoutMillis;
         _use100Continue = use100Continue;
+        _proxyHost = proxyHost;
+        _proxyPort = proxyPort;
+        _proxyAuthentication = proxyAuthentication;
+        _preemptiveProxyAuthenticationScheme = preemptiveProxyAuthenticationScheme;
     }
 
     /**
@@ -90,7 +123,7 @@ public class HttpClient {
      * @throws IOException on network errors.
      */
     public HttpResponse sendRequest(HttpRequestMethod method, String url, HttpRequestBody body,
-            HttpHeaderWithValue... headers) throws IOException {
+                    HttpHeaderWithValue... headers) throws IOException {
         return sendRequest(EventRecorder.NULL_RECORDER, method, url, body, headers);
     }
 
@@ -106,13 +139,13 @@ public class HttpClient {
      * @throws IOException on network errors.
      */
     public HttpResponse sendRequest(EventRecorder eventRecorder, HttpRequestMethod method, String url,
-            HttpRequestBody body, HttpHeaderWithValue... requestHeaders) throws IOException {
+                    HttpRequestBody body, HttpHeaderWithValue... requestHeaders) throws IOException {
         eventRecorder.recordEvent(Event.ENTER_SEND_REQUEST);
         Socket socket = null;
         try {
             long deadlineMillis = System.currentTimeMillis() + _requestTimeoutMillis;
-            socket = createSocket(eventRecorder);
-            configureSocket(socket);
+            socket = connectToHost(eventRecorder);
+
             StringBuilder sb = new StringBuilder();
             sb.append(method.name()).append(' ').append(url).append(" HTTP/1.1");
             sb.append(CRLF);
@@ -133,8 +166,15 @@ public class HttpClient {
     }
 
     private HttpResponse readResponse(EventRecorder eventRecorder, Socket socket, long deadlineMillis)
-            throws IOException {
+                    throws IOException {
         eventRecorder.recordEvent(Event.READING_RESPONSE);
+        HttpResponse response = readResponse(socket, deadlineMillis, true);
+        eventRecorder.recordEvent(Event.READ_RESPONSE);
+        return response;
+    }
+
+    private HttpResponse readResponse(Socket socket, long deadlineMillis, boolean readBodyWithoutContentLength)
+                    throws IOException, SocketTimeoutException, SocketException, EOFException {
         byte[] buffer = new byte[RECEIVE_BUFFER_SIZE];
         InputStream in = socket.getInputStream();
         int totalRead = 0;
@@ -158,45 +198,52 @@ public class HttpClient {
         if (endOfStatusLine == 0) {
             throw new IllegalStateException("Found CRLFCRLF but not CRLF!?!");
         }
+
         int httpResponseCode = parseHttpStatusCode(buffer, endOfStatusLine);
-
-        ByteArrayOutputStream bodyOutputStream = new ByteArrayOutputStream();
-        if (bodyPosition < totalRead) {
-            bodyOutputStream.write(buffer, bodyPosition, totalRead - bodyPosition);
-        }
-
         List<HttpHeaderWithValue> responseHeaders = parseHeaders(buffer, endOfStatusLine + 2, bodyPosition);
         Integer contentLength = findContentLength(responseHeaders);
-        if (contentLength != null) {
-            // Read until content-length body bytes have been read
-            int remainingContentLength = contentLength.intValue() - (totalRead - bodyPosition);
-            while (remainingContentLength > 0) {
-                updateSocketTimeout(socket, deadlineMillis);
-                int read = in.read(buffer, 0, Math.min(buffer.length, remainingContentLength));
-                if (read == -1) {
-                    throw new EOFException("Partial response, " + remainingContentLength + " bytes missing");
-                } else if (read == 0) {
-                    throw new SocketTimeoutException("Timeout reading response body");
-                }
-                bodyOutputStream.write(buffer, 0, read);
-                remainingContentLength -= read;
+
+        byte[] body;
+        if ((contentLength != null && contentLength.intValue() > 0) || readBodyWithoutContentLength) {
+            ByteArrayOutputStream bodyOutputStream = new ByteArrayOutputStream();
+            if (bodyPosition < totalRead) {
+                bodyOutputStream.write(buffer, bodyPosition, totalRead - bodyPosition);
             }
+            if (contentLength != null) {
+                // Read until content-length body bytes have been read
+                int remainingContentLength = contentLength.intValue() - (totalRead - bodyPosition);
+                while (remainingContentLength > 0) {
+                    updateSocketTimeout(socket, deadlineMillis);
+                    int read = in.read(buffer, 0, Math.min(buffer.length, remainingContentLength));
+                    if (read == -1) {
+                        throw new EOFException("Partial response, " + remainingContentLength + " bytes missing");
+                    } else if (read == 0) {
+                        throw new SocketTimeoutException("Timeout reading response body");
+                    }
+                    bodyOutputStream.write(buffer, 0, read);
+                    remainingContentLength -= read;
+                }
+            } else {
+                // Read until end of file
+                for (;;) {
+                    updateSocketTimeout(socket, deadlineMillis);
+                    int read = in.read(buffer, 0, buffer.length);
+                    if (read == -1) {
+                        // Done!
+                        break;
+                    } else if (read == 0) {
+                        throw new SocketTimeoutException("Timeout reading response body");
+                    }
+                    bodyOutputStream.write(buffer, 0, read);
+                }
+            }
+            body = bodyOutputStream.toByteArray();
         } else {
-            // Read until end of file
-            for (;;) {
-                updateSocketTimeout(socket, deadlineMillis);
-                int read = in.read(buffer, 0, buffer.length);
-                if (read == -1) {
-                    // Done!
-                    break;
-                } else if (read == 0) {
-                    throw new SocketTimeoutException("Timeout reading response body");
-                }
-                bodyOutputStream.write(buffer, 0, read);
-            }
+            body = new byte[0];
         }
-        eventRecorder.recordEvent(Event.READ_RESPONSE);
-        return new HttpResponse(httpResponseCode, responseHeaders, bodyOutputStream.toByteArray());
+
+        HttpResponse response = new HttpResponse(httpResponseCode, responseHeaders, body);
+        return response;
     }
 
     private Integer findContentLength(List<HttpHeaderWithValue> responseHeaders) {
@@ -253,7 +300,7 @@ public class HttpClient {
      * @throws IOException on I/O errors.
      */
     private void sendRequest(EventRecorder eventRecorder, Socket socket, byte[] requestHeader, byte[] requestBody)
-            throws IOException {
+                    throws IOException {
         eventRecorder.recordEvent(Event.SENDING_REQUEST);
         OutputStream out = socket.getOutputStream();
         out.write(requestHeader);
@@ -314,18 +361,6 @@ public class HttpClient {
     }
 
     /**
-     * Configure the socket, optimize for a short request/response.
-     *
-     * @param socket The socket.
-     * @throws SocketException on errors.
-     */
-    private void configureSocket(Socket socket) throws SocketException {
-        socket.setTcpNoDelay(true);
-        socket.setKeepAlive(false);
-        socket.setSoTimeout(_requestTimeoutMillis);
-    }
-
-    /**
      * Update the socket timeout with a new value, fail on timeout.
      *
      * @param socket The socket.
@@ -334,7 +369,7 @@ public class HttpClient {
      * @throws SocketException on errors.
      */
     private void updateSocketTimeout(Socket socket, long deadlineMillis)
-            throws SocketTimeoutException, SocketException {
+                    throws SocketTimeoutException, SocketException {
         long remainingTimeMillis = deadlineMillis - System.currentTimeMillis();
         if (remainingTimeMillis <= 0) {
             throw new SocketTimeoutException("Request timed out");
@@ -350,14 +385,14 @@ public class HttpClient {
             if (buffer[lineEndPos] == '\n' && buffer[lineEndPos - 1] == '\r') {
                 if (lineEndPos > lineStartPos + 1) {
                     String headerLine = new String(buffer, lineStartPos, lineEndPos - 1 - lineStartPos,
-                            HTTP_HEADER_CHARSET);
+                                    HTTP_HEADER_CHARSET);
                     int separatorPos = headerLine.indexOf(":");
                     if (separatorPos == -1) {
                         responseHeaders.add(new HttpHeader(headerLine).withValue(""));
                     } else if (separatorPos > 0) {
                         String headerKey = headerLine.substring(0, separatorPos).toLowerCase();
                         String headerValue = (separatorPos < headerLine.length()
-                                ? headerLine.substring(separatorPos + 1) : "").trim();
+                                        ? headerLine.substring(separatorPos + 1) : "").trim();
                         responseHeaders.add(new HttpHeader(headerKey).withValue(headerValue));
                     }
                 }
@@ -367,7 +402,7 @@ public class HttpClient {
         return responseHeaders;
     }
 
-    static int findEndOfLine(byte[] buffer, int startPos, int endPos) {
+    private static int findEndOfLine(byte[] buffer, int startPos, int endPos) {
         for (int pos = startPos; pos < endPos - 1; pos++) {
             if (buffer[pos] == '\r' && buffer[pos + 1] == '\n') {
                 return pos;
@@ -376,17 +411,24 @@ public class HttpClient {
         return -1;
     }
 
-    static int findBodyPosition(byte[] buffer, int endPos) {
+    private static int findBodyPosition(byte[] buffer, int endPos) {
         int bodyPos = 0;
         while (bodyPos + 3 < endPos) {
             if (buffer[bodyPos] == '\r' && buffer[bodyPos + 1] == '\n' && buffer[bodyPos + 2] == '\r'
-                    && buffer[bodyPos + 3] == '\n')
+                            && buffer[bodyPos + 3] == '\n')
                 return bodyPos + 4;
             bodyPos++;
         }
         return 0;
     }
 
+    /**
+     * Determine the character set from the specified content type header and fall back to the default HTTP character
+     * set (ISO-8859-1) if the content type is missing or unsupported.
+     * 
+     * @param contentType The content type header.
+     * @return character set.
+     */
     public static Charset extractCharsetFromContentType(String contentType) {
         int charsetIndex = contentType.indexOf("charset");
         if (charsetIndex != -1) {
@@ -395,9 +437,10 @@ public class HttpClient {
                 int nextCommaIndex = contentType.indexOf(",", startIndex);
                 int nextSemiColonIndex = contentType.indexOf(";", startIndex);
                 int endIndex = (nextCommaIndex > startIndex && nextSemiColonIndex > startIndex)
-                        ? Math.min(nextCommaIndex, nextSemiColonIndex)
-                        : (((nextCommaIndex > startIndex) ? nextCommaIndex
-                                : ((nextSemiColonIndex > startIndex) ? nextSemiColonIndex : contentType.length())));
+                                ? Math.min(nextCommaIndex, nextSemiColonIndex)
+                                : (((nextCommaIndex > startIndex) ? nextCommaIndex
+                                                : ((nextSemiColonIndex > startIndex) ? nextSemiColonIndex
+                                                                : contentType.length())));
                 String charsetName = contentType.substring(startIndex, endIndex);
                 try {
                     return Charset.forName(charsetName);
@@ -409,36 +452,247 @@ public class HttpClient {
         return HTTP_DEFAULT_CHARSET;
     }
 
-    private Socket createSocket(EventRecorder recorder) throws UnknownHostException, IOException {
-        Socket nonSslSocket = new Socket();
+    /**
+     * Connect to target host directly or through proxy and complete the SSL handshake if using SSL.
+     *
+     * @param recorder The event recorder.
+     * @return connected socket.
+     * @throws IOException on errors.
+     */
+    private Socket connectToHost(EventRecorder recorder) throws IOException {
         recorder.recordEvent(Event.CONNECTING);
-        nonSslSocket.connect(new InetSocketAddress(_host, _port), _connectTimeoutMillis);
+        Socket nonSslSocket = (_proxyHost == null) ? connect(_host, _port) : connectThroughProxy(recorder);
         recorder.recordEvent(Event.CONNECTED);
+
         if (_sslSocketFactory != null) {
-            SSLSocket socket = (SSLSocket) _sslSocketFactory.createSocket(nonSslSocket, _host, _port, true);
-            socket.setUseClientMode(true);
-            socket.startHandshake();
-            recorder.recordEvent(Event.SSL_HANDSHAKE_COMPLETE);
-            return socket;
+            Socket socketToClose = nonSslSocket;
+            try {
+                SSLSocket sslSocket = (SSLSocket) _sslSocketFactory.createSocket(nonSslSocket, _host, _port, true);
+                sslSocket.setUseClientMode(true);
+                sslSocket.startHandshake();
+                recorder.recordEvent(Event.SSL_HANDSHAKE_COMPLETE);
+                socketToClose = null;
+                return sslSocket;
+            } finally {
+                if (socketToClose != null) {
+                    socketToClose.close();
+                }
+            }
         } else {
             return nonSslSocket;
         }
     }
 
     /**
+     * Connect to the given host and port and configure the socket.
+     *
+     * @param host The host.
+     * @param port The port.
+     * @return connected socket.
+     * @throws IOException on errors.
+     */
+    private Socket connect(String host, int port) throws IOException {
+        Socket socketToClose = null;
+        try {
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), _connectTimeoutMillis);
+            socketToClose = socket;
+            socket.setTcpNoDelay(true);
+            socket.setKeepAlive(false);
+            socket.setSoTimeout(_requestTimeoutMillis);
+            socketToClose = null;
+            return socket;
+        } finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    /**
+     * Connect to the target host with a tunnel through the configured proxy server.
+     * 
+     * @param recorder The event recorder.
+     * @return socket tunneling to the target host.
+     * @throws IOException on errors.
+     */
+    private Socket connectThroughProxy(EventRecorder recorder) throws IOException {
+        Socket socketToClose = null;
+        try {
+            if (_preemptiveProxyAuthenticationScheme == AuthenticationScheme.BASIC) {
+                return connectThroughProxyWithBasicAuthentication(recorder, true);
+            } else if (_preemptiveProxyAuthenticationScheme == AuthenticationScheme.NTLM) {
+                return connectThroughProxyWithNtlmAuthentication(recorder, true);
+            }
+
+            Socket socket = connect(_proxyHost, _proxyPort);
+            socketToClose = socket;
+            recorder.recordEvent(Event.CONNECTED_PROXY);
+
+            socket.getOutputStream().write(createProxyConnectRequest().getBytes(HTTP_HEADER_CHARSET));
+            HttpResponse resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
+
+            if (resp.isSuccess()) {
+                socketToClose = null;
+                return socket;
+            } else if (resp.getHttpResponseCode() == 407) {
+                socket.close();
+                socketToClose = null;
+
+                List<String> proxyAuthHeaders = resp.getHeaders(HttpHeaders.PROXY_AUTHENTICATE);
+                if (_proxyAuthentication != null) {
+                    if (proxyAuthHeaders.stream().anyMatch(s -> s.startsWith("Basic"))) {
+                        return connectThroughProxyWithBasicAuthentication(recorder, false);
+                    } else if (proxyAuthHeaders.contains("NTLM")) {
+                        return connectThroughProxyWithNtlmAuthentication(recorder, false);
+                    }
+                }
+
+                throw new ProxyAuthenticationRequiredException("Failed to connect through " + _proxyHost + ":"
+                                + _proxyPort + ", authentication required", proxyAuthHeaders);
+            } else {
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                                + ", error " + resp.getHttpResponseCode());
+            }
+        } finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    /**
+     * Connect to the specified proxy server and send a CONNECT command along with base64-coded basic authentication.
+     * 
+     * @param recorder The event recorder.
+     * @param recordConnected The flag to record when connected or not.
+     * @return connected socket tunneling to the target host.
+     * @throws IOException on errors.
+     */
+    private Socket connectThroughProxyWithBasicAuthentication(EventRecorder recorder, boolean recordConnected)
+                    throws IOException {
+        Socket socketToClose = null;
+        try {
+            Socket socket = connect(_proxyHost, _proxyPort);
+            socketToClose = socket;
+            if (recordConnected) {
+                recorder.recordEvent(Event.CONNECTED_PROXY);
+            }
+
+            socket.getOutputStream()
+                            .write(createProxyConnectRequest("Proxy-Authorization: Basic " + Base64.getEncoder()
+                                            .encodeToString((_proxyAuthentication.getUserName() + ":"
+                                                            + new String(_proxyAuthentication.getPassword()))
+                                                                            .getBytes(HTTP_HEADER_CHARSET))).getBytes(
+                                                                                            HTTP_HEADER_CHARSET));
+            HttpResponse resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
+            if (resp.isSuccess()) {
+                recorder.recordEvent(Event.AUTHENTICATED_PROXY);
+                socketToClose = null;
+                return socket;
+            } else if (resp.getHttpResponseCode() == 407) {
+                throw new ProxyAuthenticationFailedException("Basic proxy authentication failed");
+            } else {
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                                + ", error " + resp.getHttpResponseCode());
+            }
+        } finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    /**
+     * Connect to the specified proxy server, authenticate using NTLM and send a CONNECT message.
+     * 
+     * @param recorder The event recorder.
+     * @param recordConnected The flag to record when connected or not.
+     * @return connected socket tunneling to the target host.
+     * @throws IOException on errors.
+     */
+    private Socket connectThroughProxyWithNtlmAuthentication(EventRecorder recorder, boolean recordConnected)
+                    throws IOException {
+        Socket socketToClose = null;
+        try {
+            Socket socket = connect(_proxyHost, _proxyPort);
+            socketToClose = socket;
+            if (recordConnected) {
+                recorder.recordEvent(Event.CONNECTED_PROXY);
+            }
+            NTLMEngine ntlmEngine = new NTLMEngine();
+            String domain = null;
+            String workstation = null;
+
+            socket.getOutputStream()
+                            .write(createProxyConnectRequest("Proxy-Authorization: NTLM "
+                                            + ntlmEngine.generateType1Msg(domain, workstation))
+                                                            .getBytes(HTTP_HEADER_CHARSET));
+            HttpResponse resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
+
+            if (resp.getHttpResponseCode() == 407) {
+                String encodedChallenge = resp.getHeaders(HttpHeaders.PROXY_AUTHENTICATE).stream()
+                                .filter(h -> h.startsWith("NTLM ")).findFirst().map(h -> h.substring(5).trim())
+                                .orElse("");
+                if (!encodedChallenge.isEmpty()) {
+                    socket.getOutputStream()
+                                    .write(createProxyConnectRequest("Proxy-Authorization: NTLM "
+                                                    + ntlmEngine.generateType3Msg(_proxyAuthentication.getUserName(),
+                                                                    new String(_proxyAuthentication.getPassword()),
+                                                                    domain, workstation, encodedChallenge))
+                                                                                    .getBytes(HTTP_HEADER_CHARSET));
+                    resp = readResponse(socket, _requestTimeoutMillis + System.currentTimeMillis(), false);
+                }
+            }
+
+            if (resp.isSuccess()) {
+                recorder.recordEvent(Event.AUTHENTICATED_PROXY);
+                socketToClose = null;
+                return socket;
+            } else if (resp.getHttpResponseCode() == 407) {
+                throw new ProxyAuthenticationFailedException("NTLM proxy authentication failed");
+            } else {
+                throw new ProxyProtocolException("Failed to connect through " + _proxyHost + ":" + _proxyPort
+                                + ", error " + resp.getHttpResponseCode());
+            }
+        } catch (NTLMEngineException e) {
+            throw new ProxyAuthenticationFailedException("NTLM proxy authentication failed", e);
+        } finally {
+            if (socketToClose != null) {
+                socketToClose.close();
+            }
+        }
+    }
+
+    private String createProxyConnectRequest(String... headers) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CONNECT ").append(_host).append(':').append(_port).append(" HTTP/1.1").append(CRLF);
+        sb.append("Host: ").append(_host).append(':').append(_port).append(CRLF);
+        sb.append("Proxy-Connection: keep-alive").append(CRLF);
+        sb.append("User-Agent: HttpClient").append(CRLF);
+        for (String header : headers) {
+            sb.append(header).append(CRLF);
+        }
+        sb.append(CRLF);
+        return sb.toString();
+    }
+
+    /**
      * Events logged to the event recorder for a request.
      */
     public enum Event {
-        ENTER_SEND_REQUEST,
-        CONNECTING,
-        CONNECTED,
-        SSL_HANDSHAKE_COMPLETE,
-        SENDING_REQUEST,
-        SENT_HEADERS_WAITING_FOR_100_CONTINUE,
-        RECEIVED_100_CONTINUE,
-        SENT_REQUEST,
-        READING_RESPONSE,
-        READ_RESPONSE,
+        ENTER_SEND_REQUEST, //
+        CONNECTING, //
+        CONNECTED_PROXY, //
+        AUTHENTICATED_PROXY, //
+        CONNECTED, //
+        SSL_HANDSHAKE_COMPLETE, //
+        SENDING_REQUEST, //
+        SENT_HEADERS_WAITING_FOR_100_CONTINUE, //
+        RECEIVED_100_CONTINUE, //
+        SENT_REQUEST, //
+        READING_RESPONSE, //
+        READ_RESPONSE, //
         EXIT_SEND_REQUEST
     }
 }
